@@ -77,6 +77,7 @@ import { renderInstances } from "./views/instances.ts";
 import { renderLogs } from "./views/logs.ts";
 import { renderNodes } from "./views/nodes.ts";
 import { renderOverview } from "./views/overview.ts";
+import { renderProjects } from "./views/projects.ts";
 import { renderSessions } from "./views/sessions.ts";
 import { renderSkills } from "./views/skills.ts";
 
@@ -429,6 +430,20 @@ export function renderApp(state: AppViewState) {
                 onRefresh: () => loadSessions(state),
                 onPatch: (key, patch) => patchSession(state, key, patch),
                 onDelete: (key) => deleteSessionAndRefresh(state, key),
+              })
+            : nothing
+        }
+
+        ${
+          state.tab === "projects"
+            ? renderProjects({
+                client: state.client,
+                connected: state.connected,
+                sessionKey: state.sessionKey,
+                onRequestUpdate: () => {
+                  // Trigger a Lit re-render by calling requestUpdate on the host element
+                  (state as unknown as { requestUpdate?: () => void }).requestUpdate?.();
+                },
               })
             : nothing
         }
