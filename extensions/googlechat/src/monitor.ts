@@ -2,6 +2,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import {
   GROUP_POLICY_BLOCKED_LABEL,
+  createInboundEnvelopeBuilder,
+  createScopedPairingAccess,
   createReplyPrefixOptions,
   readJsonBodyWithLimit,
   registerWebhookTarget,
@@ -396,6 +398,11 @@ async function processMessageWithPipeline(params: {
   mediaMaxMb: number;
 }): Promise<void> {
   const { event, account, config, runtime, core, statusSink, mediaMaxMb } = params;
+  const pairing = createScopedPairingAccess({
+    core,
+    channel: "googlechat",
+    accountId: account.accountId,
+  });
   const space = event.space;
   const message = event.message;
   if (!space || !message) {
@@ -514,7 +521,7 @@ async function processMessageWithPipeline(params: {
   const shouldComputeAuth = core.channel.commands.shouldComputeCommandAuthorized(rawBody, config);
   const storeAllowFrom =
     !isGroup && dmPolicy !== "allowlist" && (dmPolicy !== "open" || shouldComputeAuth)
-      ? await core.channel.pairing.readAllowFromStore("googlechat").catch(() => [])
+      ? await pairing.readAllowFromStore().catch(() => [])
       : [];
   const access = resolveDmGroupAccessWithLists({
     isGroup,
@@ -590,8 +597,7 @@ async function processMessageWithPipeline(params: {
 
     if (access.decision !== "allow") {
       if (access.decision === "pairing") {
-        const { code, created } = await core.channel.pairing.upsertPairingRequest({
-          channel: "googlechat",
+        const { code, created } = await pairing.upsertPairingRequest({
           id: senderId,
           meta: { name: senderName || undefined, email: senderEmail },
         });
@@ -641,6 +647,15 @@ async function processMessageWithPipeline(params: {
       id: spaceId,
     },
   });
+  const buildEnvelope = createInboundEnvelopeBuilder({
+    cfg: config,
+    route,
+    sessionStore: config.session?.store,
+    resolveStorePath: core.channel.session.resolveStorePath,
+    readSessionUpdatedAt: core.channel.session.readSessionUpdatedAt,
+    resolveEnvelopeFormatOptions: core.channel.reply.resolveEnvelopeFormatOptions,
+    formatAgentEnvelope: core.channel.reply.formatAgentEnvelope,
+  });
 
   let mediaPath: string | undefined;
   let mediaType: string | undefined;
@@ -656,20 +671,10 @@ async function processMessageWithPipeline(params: {
   const fromLabel = isGroup
     ? space.displayName || `space:${spaceId}`
     : senderName || `user:${senderId}`;
-  const storePath = core.channel.session.resolveStorePath(config.session?.store, {
-    agentId: route.agentId,
-  });
-  const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
-  const previousTimestamp = core.channel.session.readSessionUpdatedAt({
-    storePath,
-    sessionKey: route.sessionKey,
-  });
-  const body = core.channel.reply.formatAgentEnvelope({
+  const { storePath, body } = buildEnvelope({
     channel: "Google Chat",
     from: fromLabel,
     timestamp: event.eventTime ? Date.parse(event.eventTime) : undefined,
-    previousTimestamp,
-    envelope: envelopeOptions,
     body: rawBody,
   });
 
