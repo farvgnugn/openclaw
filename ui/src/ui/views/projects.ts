@@ -41,6 +41,8 @@ let _chatInputs: Record<string, string> = {};
 let _chatThinking: Record<string, boolean> = {};
 let _chatHistories: Record<string, ChatMessage[]> = {};
 let _requestUpdate: (() => void) | null = null;
+// Per-project session keys — each project gets its own isolated chat session
+let _projectSessionKeys: Record<string, string> = {};
 
 function update() {
   _requestUpdate?.();
@@ -67,6 +69,62 @@ function loadChatFromStorage(projectId: string): ChatMessage[] {
     // ignore
   }
   return [];
+}
+
+// ─── Per-project session management ──────────────────────────────────────────
+
+const PROJECT_SESSION_STORAGE_KEY = "projects-session-keys";
+
+function loadProjectSessionKeys(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(PROJECT_SESSION_STORAGE_KEY);
+    if (raw) return JSON.parse(raw) as Record<string, string>;
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+function saveProjectSessionKeys() {
+  try {
+    localStorage.setItem(PROJECT_SESSION_STORAGE_KEY, JSON.stringify(_projectSessionKeys));
+  } catch {
+    // ignore
+  }
+}
+
+async function getOrCreateProjectSession(
+  client: GatewayBrowserClient,
+  projectId: string,
+  projectName: string,
+): Promise<string> {
+  // Return cached session key if it exists
+  if (_projectSessionKeys[projectId]) {
+    return _projectSessionKeys[projectId];
+  }
+
+  // Try to create a new named session for this project
+  try {
+    const result = await client.request<{ sessionKey?: string; key?: string }>("sessions.create", {
+      label: `project:${projectId}`,
+      agentId: "main",
+      context: `You are a coding assistant for the ${projectName} project. Answer questions about its codebase, architecture, and help debug issues.`,
+    });
+    const key = result.sessionKey ?? result.key;
+    if (key) {
+      _projectSessionKeys[projectId] = key;
+      saveProjectSessionKeys();
+      return key;
+    }
+  } catch {
+    // sessions.create not supported — fall back to a stable derived key
+  }
+
+  // Fallback: use a stable localStorage-persisted key derived from projectId
+  const fallbackKey = `project-session-${projectId}`;
+  _projectSessionKeys[projectId] = fallbackKey;
+  saveProjectSessionKeys();
+  return fallbackKey;
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
@@ -141,7 +199,7 @@ function selectProject(id: string) {
 
 async function sendChat(
   client: GatewayBrowserClient | null,
-  sessionKey: string,
+  _mainSessionKey: string,
   projectId: string,
   message: string,
 ) {
@@ -149,6 +207,9 @@ async function sendChat(
   if (!project || !client) {
     return;
   }
+
+  // Use a per-project session so chats don't bleed into the main channel
+  const sessionKey = await getOrCreateProjectSession(client, projectId, project.name);
 
   const stack = project.stack ?? [];
   const path = _iframePath[projectId] ?? "/";
@@ -218,13 +279,16 @@ async function sendChat(
 
 async function scanCodebase(
   client: GatewayBrowserClient | null,
-  sessionKey: string,
+  _mainSessionKey: string,
   projectId: string,
 ) {
   const project = _projects.find((p) => p.id === projectId);
   if (!project || !client) {
     return;
   }
+
+  // Use per-project session
+  const sessionKey = await getOrCreateProjectSession(client, projectId, project.name);
 
   const msg = `[Context: Projects dashboard - code scan requested for ${project.name}]\nPlease scan the codebase and summarize the architecture so you can answer questions about it.`;
   const userMsg: ChatMessage = {
@@ -792,6 +856,7 @@ export function renderProjects(props: ProjectsProps) {
 
 export function initProjects(onRequestUpdate: () => void) {
   _requestUpdate = onRequestUpdate;
+  _projectSessionKeys = loadProjectSessionKeys();
   void loadProjects();
   startAutoRefresh(onRequestUpdate);
 }
